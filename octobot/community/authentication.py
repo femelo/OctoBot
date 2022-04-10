@@ -22,6 +22,7 @@ import aiohttp
 
 import octobot.constants as constants
 import octobot.community.community_supports as community_supports
+import octobot.community.community_feed as community_feed
 import octobot_commons.constants as commons_constants
 import octobot_commons.authentication as authentication
 
@@ -50,6 +51,7 @@ class CommunityAuthentication(authentication.Authenticator):
         self._aiohttp_session = None
         self._cache = {}
         self._fetch_supports_task = None
+        self._community_feed = None
 
         if username and password:
             self.login(username, password)
@@ -70,6 +72,14 @@ class CommunityAuthentication(authentication.Authenticator):
     def init_supports(self):
         self.initialized_event = asyncio.Event()
         self._fetch_supports_task = asyncio.create_task(self._auth_and_fetch_supports())
+
+    async def register_feed_callback(self, topic, callback):
+        await super().register_feed_callback(topic, callback)
+        if self._community_feed is None:
+            #TODO
+            feed_url = "ws://localhost:8765"
+            self._community_feed = community_feed.CommunityFeed(feed_url, self._auth_token, self.feed_callbacks)
+            await self._community_feed.start()
 
     def can_authenticate(self):
         return "todo" not in self.authentication_url
