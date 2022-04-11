@@ -15,27 +15,41 @@
 #  License along with OctoBot. If not, see <https://www.gnu.org/licenses/>.
 import websockets
 import asyncio
+import enum
+import json
 
 import octobot_commons.logging as bot_logging
+import octobot_commons.authentication as authentication
+
+
+class COMMANDS(enum.Enum):
+    SUBSCRIBE = "subscribe"
+    MESSAGE = "message"
+
+
+class CHANNELS(enum.Enum):
+    SIGNALS = "Spree::SignalChannel"
 
 
 class CommunityFeed:
-    def __init__(self, feed_url, auth_token, feed_callbacks):
+    INIT_TIMEOUT = 60
+
+    def __init__(self, feed_url, authentication, feed_callbacks):
         self.logger: bot_logging.BotLogger = bot_logging.get_logger(
             self.__class__.__name__
         )
         self.feed_url = feed_url
-        self.auth_token = auth_token
         self.feed_callbacks = feed_callbacks
         self.should_stop = False
         self.websocket_connection = None
         self.consumer_task = None
         self.lock = asyncio.Lock()
+        self.authentication = authentication
 
     async def start(self):
         await self._ensure_connection()
         if self.consumer_task is None or self.consumer_task.done():
-            self.consumer_task = asyncio.create_task(self.start_consumer("'hello path'"))
+            self.consumer_task = asyncio.create_task(self.start_consumer("default_path"))
 
     async def stop(self):
         self.should_stop = True
@@ -51,10 +65,45 @@ class CommunityFeed:
     async def consume(self, message):
         await self.feed_callbacks[self._get_feed(message)](message)
 
-    async def send(self, message, reconnect_if_necessary=True):
+    async def send(self, message, command=COMMANDS.MESSAGE.value, identifier=CHANNELS.SIGNALS.value,
+                   reconnect_if_necessary=True):
         if reconnect_if_necessary:
             await self._ensure_connection()
-        await self.websocket_connection.send(message)
+        await self.websocket_connection.send(self._build_ws_message(message, command, identifier))
+
+    async def send_signal(self, signal_stream_id, signal_version, signal_content, reconnect_if_necessary=True):
+        await self.send(
+            {
+                "signal_stream_id": signal_stream_id,
+                "signal": signal_content,
+                "version": signal_version
+            },
+            reconnect_if_necessary=reconnect_if_necessary
+        )
+
+    def _build_ws_message(self, message, command, identifier):
+        return json.dumps({
+            "command": command,
+            "identifier": self._build_channel_identifier(identifier),
+            "data": message
+        })
+
+    def _build_channel_identifier(self, channel_name):
+        return {
+            "channel": channel_name
+        }
+
+    async def _subscribe(self):
+        await self.send({}, COMMANDS.SUBSCRIBE.value)
+        # waiting for subscription confirmation
+        async for message in self.websocket_connection:
+            self.logger.debug("Waiting for subscription confirmation...")
+            # resp = json.loads(await self.websocket_connection.recv())  # we can't just read message here ?
+            resp = json.loads(message)
+            if resp.get("type") and resp.get("type") == "confirm_subscription":
+                return True
+            # TODO check
+            raise authentication.AuthenticationError(f"Failed to subscribe to feed: {message}")
 
     async def _ensure_connection(self):
         if not self.is_connected():
@@ -64,7 +113,14 @@ class CommunityFeed:
                     await self._connect()
 
     async def _connect(self):
-        self.websocket_connection = await websockets.connect(self.feed_url)
+        if self.authentication.initialized_event is not None:
+            await asyncio.wait_for(self.authentication.initialized_event.wait(), self.INIT_TIMEOUT)
+        if self.authentication._auth_token is None:
+            raise authentication.AuthenticationRequired("OctoBot Community authentication is required to "
+                                                        "use community trading signals")
+        headers = {"Authorization": f"Bearer {self.authentication._auth_token}"}
+        self.websocket_connection = await websockets.connect(self.feed_url, extra_headers=headers)
+        await self._subscribe()
         self.logger.info("Connected to community feed")
 
     def is_connected(self):

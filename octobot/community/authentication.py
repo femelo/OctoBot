@@ -50,6 +50,7 @@ class CommunityAuthentication(authentication.Authenticator):
         self._session = requests.Session()
         self._aiohttp_session = None
         self._cache = {}
+        self.initialized_event = None
         self._fetch_supports_task = None
         self._community_feed = None
 
@@ -78,8 +79,14 @@ class CommunityAuthentication(authentication.Authenticator):
         if self._community_feed is None:
             #TODO
             feed_url = "ws://localhost:8765"
-            self._community_feed = community_feed.CommunityFeed(feed_url, self._auth_token, self.feed_callbacks)
+            self._community_feed = community_feed.CommunityFeed(feed_url, self, self.feed_callbacks)
             await self._community_feed.start()
+
+    async def send_signal(self, signal_stream_id, signal_version, signal_content):
+        """
+        Sends a signal
+        """
+        await self._community_feed.send_signal(signal_stream_id, signal_version, signal_content)
 
     def can_authenticate(self):
         return "todo" not in self.authentication_url
